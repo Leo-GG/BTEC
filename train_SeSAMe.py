@@ -10,16 +10,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, median_absolute_error
 
 
-def resample_group(group, N, noise=False, noise_mag=2, resample=True):
-    """Resample group to N representatives with optional noise"""
-    n_representatives = N
-    group = group.sample(n=n_representatives, replace=resample, random_state=42)
-    if noise:
-        noise_vals = np.random.uniform(-noise_mag, noise_mag, group.shape[0])
-        group.Age = group.Age + noise_vals
-    return group
-
-
 def main():
     # Load data
     print("Loading data...")
@@ -34,21 +24,9 @@ def main():
     print(f"Data shape: {data.shape}")
     print(f"Metadata shape: {mdata.shape}")
     
-    # Resample by dataset
-    print("\nResampling data...")
-    resampled_mdata = mdata.groupby('Dataset', group_keys=False).apply(resample_group, 200)
-    resampled_data = data.loc[resampled_mdata.index].copy()
-    
-    print(f"Resampled data shape: {resampled_data.shape}")
-    print(f"Dataset distribution:\n{resampled_mdata.Dataset.value_counts()}")
-    
     # Prepare training data
-    X = resampled_data[(resampled_mdata.Dataset != 'GS0E88883') & 
-                       (resampled_mdata.Dataset != 'GSE213478') &
-                       (resampled_mdata.Age > 0)]
-    y = resampled_mdata.Age[(resampled_mdata.Dataset != 'GS0E88883') & 
-                            (resampled_mdata.Dataset != 'GSE213478') &
-                            (resampled_mdata.Age > 0)]
+    X = data[(mdata.Age > 0)]
+    y = mdata.Age[(mdata.Age > 0)]
     
     print(f"\nTraining data shape: {X.shape}")
     
@@ -57,7 +35,7 @@ def main():
     print("Running ElasticNetCV to find optimal alpha...")
     regr_cv = ElasticNetCV(random_state=42,
                            l1_ratio=[.5],
-                           alphas=np.logspace(-2, -4, 10),
+                           alphas=np.logspace(1, -3, 10),
                            eps=1e-4,
                            n_jobs=-1,
                            cv=5,
@@ -81,8 +59,9 @@ def main():
     
     # Leave-One-Cohort-Out (LOCO) validation
     print("\n=== Leave-One-Cohort-Out Validation ===")
-    sel_alpha = 0.0013
+    sel_alpha = 0.0077 # Rounded from 0.007742636826811277 regr_cv.alpha_
     loco_results = pd.DataFrame(columns=['Dataset', 'N', 'RMSE', 'MAE', 'r'])
+    loco_predictions = pd.DataFrame(columns=['Sample', 'Dataset', 'Age', 'Predicted_Age'])
     
     for dataset in mdata.Dataset.unique():
         print(f"\nLOCO - Testing on: {dataset}")
@@ -111,16 +90,28 @@ def main():
         
         loco_results.loc[len(loco_results)] = [dataset, n_samples, rmse_loco, mae_loco, corr_loco]
         
+        # Store predictions
+        pred_df = pd.DataFrame({
+            'Sample': X_test_loco.index,
+            'Dataset': dataset,
+            'Age': y_test_loco.values,
+            'Predicted_Age': y_pred_loco
+        })
+        loco_predictions = pd.concat([loco_predictions, pred_df], ignore_index=True)
+        
         print(f"  N={n_samples}, RMSE={rmse_loco:.4f}, MAE={mae_loco:.4f}, r={corr_loco:.4f}")
     
     print("\nLOCO Results Summary:")
     print(loco_results)
-    loco_results.to_csv('LOOC_results_Sesame.csv', index=False)
-    print("Saved LOCO results to LOOC_results_Sesame.csv")
+    loco_results.to_csv('LOCO_results_Sesame.csv', index=False)
+    print("Saved LOCO results to LOCO_results_Sesame.csv")
     
-    # Train final model on full resampled data
+    loco_predictions.to_csv('LOCO_predictions_Sesame.csv', index=False)
+    print(f"Saved {len(loco_predictions)} predictions to LOCO_predictions_Sesame.csv")
+    
+    # Train final model on full data
     print("\n=== Training Final Model ===")
-    print("Training ElasticNet model on full resampled dataset...")
+    print("Training ElasticNet model on full dataset...")
     regr = ElasticNet(random_state=42,
                       l1_ratio=0.5,
                       alpha=sel_alpha,
@@ -146,8 +137,11 @@ def main():
     # Keep only non-zero coefficients
     var_clock = var_clock[var_clock.Coefficient != 0]
     
-    print(f"Saving {var_clock.shape[0]} non-zero coefficients to VAR_model_Sesame.csv")
-    var_clock.to_csv('VAR_model_Sesame.csv')
+    # Add intercept as a row
+    var_clock.loc['Intercept'] = [regr.intercept_, 0]
+    
+    print(f"Saving {var_clock.shape[0] - 1} non-zero coefficients + intercept to BTEC_Sesame.csv")
+    var_clock.to_csv('BTEC_Sesame.csv')
     
     print("\nTraining complete!")
 
